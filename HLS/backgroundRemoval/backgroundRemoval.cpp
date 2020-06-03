@@ -8,7 +8,7 @@ void backgroundRemoval(AXI_STREAM_8& video_in, AXI_STREAM_8& video_out,
 
 #pragma HLS INTERFACE axis port=video_in
 #pragma HLS INTERFACE axis port=video_out
-#pragma HLS INTERFACE m_axi port=ref_mem
+#pragma HLS INTERFACE m_axi port=ref_mem depth=2073600
 
 #pragma HLS INTERFACE s_axilite port=ref_mem bundle=ctrl_bus
 #pragma HLS INTERFACE s_axilite port=rows bundle=ctrl_bus
@@ -34,7 +34,7 @@ void backgroundRemoval(AXI_STREAM_8& video_in, AXI_STREAM_8& video_out,
 		for (int j = 0; j < cols; ++j) {
 			int pixelValue = (int) imgBlured.read().val[0];
 			int comparisonPixel = (int) imgBuffer[j];
-			if (((pixelValue - comparisonPixel) * (pixelValue - imgBuffer[j]))
+			if (((pixelValue - comparisonPixel) * (pixelValue - comparisonPixel))
 					> (int) thresh)
 				img1.write(255);
 			else

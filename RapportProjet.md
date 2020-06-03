@@ -233,7 +233,7 @@ void backgroundRemoval(AXI_STREAM_8& video_in, AXI_STREAM_8& video_out,
 		for (int j = 0; j < MAX_WIDTH; ++j) {
 			int pixelValue = (int) img0.read().val[0];
 			int comparisonPixel = (int) imgBuffer[j];
-			if (((pixelValue - comparisonPixel) * (pixelValue - imgBuffer[j]))
+			if (((pixelValue - comparisonPixel) * (pixelValue - comparisonPixel))
 					> (int) thresh)
 				img1.write(255);
 			else
@@ -340,7 +340,7 @@ void backgroundRemoval(AXI_STREAM_8& video_in, AXI_STREAM_8& video_out,
 		for (int j = 0; j < MAX_WIDTH; ++j) {
 			int pixelValue = (int) img0.read().val[0];
 			int comparisonPixel = (int) imgBuffer[j];
-			if (((pixelValue - comparisonPixel) * (pixelValue - imgBuffer[j]))
+			if (((pixelValue - comparisonPixel) * (pixelValue - comparisonPixel))
 					> (int) thresh)
 				img1.write(255);
 			else
@@ -379,7 +379,7 @@ void backgroundRemoval(AXI_STREAM_8& video_in, AXI_STREAM_8& video_out,
 
 #pragma HLS INTERFACE axis port=video_in
 #pragma HLS INTERFACE axis port=video_out
-#pragma HLS INTERFACE m_axi port=ref_mem
+#pragma HLS INTERFACE m_axi port=ref_mem depth=2073600 max_read_burst_length=1080 num_write_outstanding=1080*4
 
 #pragma HLS INTERFACE s_axilite port=ref_mem bundle=ctrl_bus
 #pragma HLS INTERFACE s_axilite port=rows bundle=ctrl_bus
@@ -687,3 +687,148 @@ En ce basant sur les résultats de l'ip précédente voici le résultat de cette
 ![results](https://i.ibb.co/Y0Nzrzy/contour.jpg)
 
 La bounding box est bien là on elle devrait être, le mouvement vers la droite à bien été pris en compte.
+
+## Vivado / Vitis
+
+### Test AXI-Stream
+
+Pour se familiariser avec le module DMA, j'ai réaliser un montage avec une simple FIFO.
+
+#### Vivado
+
+![vivado](https://i.ibb.co/MkNwDSC/Capture.png)
+
+#### Vitis
+
+```cpp
+/******************************************************************************
+ *
+ * Copyright (C) 2009 - 2014 Xilinx, Inc.  All rights reserved.
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * Use of the Software is limited solely to applications:
+ * (a) running on a Xilinx device, or
+ * (b) that interact with a Xilinx device through a bus or interconnect.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+ * XILINX  BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+ * WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF
+ * OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ *
+ * Except as contained in this notice, the name of the Xilinx shall not be used
+ * in advertising or otherwise to promote the sale, use or other dealings in
+ * this Software without prior written authorization from Xilinx.
+ *
+ ******************************************************************************/
+
+/*
+ * helloworld.c: simple test application
+ *
+ * This application configures UART 16550 to baud rate 9600.
+ * PS7 UART (Zynq) is not initialized by this application, since
+ * bootrom/bsp configures it to baud rate 115200
+ *
+ * ------------------------------------------------
+ * | UART TYPE   BAUD RATE                        |
+ * ------------------------------------------------
+ *   uartns550   9600
+ *   uartlite    Configurable only in HW design
+ *   ps7_uart    115200 (configured by bootrom/bsp)
+ */
+
+#include <stdio.h>
+#include "platform.h"
+#include "xil_printf.h"
+#include "xaxidma.h"
+
+#define ROWS 9
+#define COLS 9
+#define SIZE_ARR (COLS * ROWS)
+
+unsigned char background[SIZE_ARR];
+unsigned char img[SIZE_ARR];
+unsigned char resultBuffer[SIZE_ARR];
+int main() {
+	init_platform();
+	Xil_DCacheDisable();
+
+	for (int i = 0; i < SIZE_ARR; ++i) {
+		img[i] = (unsigned char)i;
+	}
+	for (int i = 0; i < SIZE_ARR; ++i) {
+		resultBuffer[i] = 5u;
+	}
+	printf("\n__Fifo__\n\r");
+
+	// DMA setup
+	XAxiDma dma;
+	XAxiDma_Config * dmaDevice = XAxiDma_LookupConfig(XPAR_AXI_DMA_0_DEVICE_ID);
+	int status = XAxiDma_CfgInitialize(&dma, dmaDevice);
+	if (status != 0)
+		printf("ERROR\n");
+	XAxiDma_IntrDisable(&dma, XAXIDMA_IRQ_ALL_MASK, XAXIDMA_DEVICE_TO_DMA);
+	XAxiDma_IntrDisable(&dma, XAXIDMA_IRQ_ALL_MASK, XAXIDMA_DMA_TO_DEVICE);
+	// flush buffers cache
+	Xil_DCacheFlushRange( img, SIZE_ARR * sizeof(unsigned char));
+	Xil_DCacheFlushRange( resultBuffer, SIZE_ARR * sizeof(unsigned char));
+
+	printf("Sending data\n");
+
+	status = XAxiDma_SimpleTransfer(&dma,  img, SIZE_ARR * sizeof(unsigned char),
+	XAXIDMA_DMA_TO_DEVICE);
+	if (status != 0)
+		printf("ERROR TRANSFERT PS->PL FAILED\n");
+
+	printf("Getting data\n");
+	status = XAxiDma_SimpleTransfer(&dma, resultBuffer, SIZE_ARR * sizeof(unsigned char),
+	XAXIDMA_DEVICE_TO_DMA);
+	if (status != 0)
+		printf("ERROR TRANSFERT PL->PS FAILED\n");
+	Xil_DCacheInvalidateRange(resultBuffer, SIZE_ARR * sizeof(unsigned char));
+	// Reading data
+	for (int i = 0; i < SIZE_ARR; i++) {
+		if(i % (COLS) == 0 && i !=0)
+			printf("\n");
+		printf("%u, ", resultBuffer[i]);
+	}
+
+	cleanup_platform();
+	return 0;
+}
+```
+
+#### Résultats
+
+```
+__Fifo__
+Sending data
+Getting data
+0, 1, 2, 3, 4, 5, 6, 7, 8,
+9, 10, 11, 12, 13, 14, 15, 16, 17,
+18, 19, 20, 21, 22, 23, 24, 25, 26,
+27, 28, 29, 30, 31, 32, 33, 34, 35,
+36, 37, 38, 39, 40, 41, 42, 43, 44,
+45, 46, 47, 48, 49, 50, 51, 52, 53,
+54, 55, 56, 57, 58, 59, 60, 61, 62,
+63, 64, 65, 66, 67, 68, 69, 70, 71,
+72, 73, 74, 75, 76, 77, 78, 79, 80,
+```
+
+Le transfert s'est effectué correctement.
+
+### BackgroundRemoval
+
+Voici une architecture simple permettant d'utiliser une dma configurer pour des mots de 8 bits pour tester le module  `BackgroundRemoval`.
+

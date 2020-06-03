@@ -26,7 +26,7 @@ int main(int argc, char** argv) {
 
 	AXIvideo2cvMat(videoOut, result);
 
-	imwrite("E:\\Fac\\SoC\\Projet\\images\\backgroundRemoval35.jpg", result);
+	imwrite("E:\\Fac\\SoC\\Projet\\images\\backgroundRemoval36.jpg", result);
 
 	return 0;
 }
