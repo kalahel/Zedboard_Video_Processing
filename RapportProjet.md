@@ -2,6 +2,8 @@
 
 Mathieu Hannoun
 
+https://github.com/kalahel/Zedboard_Video_Processing
+
 ## Modules HLS
 
 ### Test Bench et .h
@@ -831,4 +833,286 @@ Le transfert s'est effectué correctement.
 ### BackgroundRemoval
 
 Voici une architecture simple permettant d'utiliser une dma configurer pour des mots de 8 bits pour tester le module  `BackgroundRemoval`.
+
+#### Vivado
+
+![vivado](https://i.ibb.co/12Wy4jH/Capture.png)
+
+#### Vitis
+
+```cpp
+#include <stdio.h>
+#include "platform.h"
+#include "xil_printf.h"
+#include "xbackgroundremoval.h"
+#include "xaxidma.h"
+
+#define ROWS 1080
+#define COLS 1920
+#define SIZE_ARR (COLS * ROWS)
+
+unsigned char background[SIZE_ARR];
+unsigned char img[SIZE_ARR];
+unsigned char resultBuffer[SIZE_ARR];
+int main() {
+	init_platform();
+	Xil_DCacheDisable();
+	for (int i = 0; i < SIZE_ARR; ++i) {
+		background[i] = 0;
+	}
+	for (int i = 0; i < SIZE_ARR; ++i) {
+		img[i] = (unsigned char)100u;
+	}
+	for (int i = 0; i < SIZE_ARR; ++i) {
+		resultBuffer[i] = 5u;
+	}
+	printf("\n__Background Removal__\n\r");
+
+	// Background remover setup
+	XBackgroundremoval backIp;
+	XBackgroundremoval_Config * backConfig = XBackgroundremoval_LookupConfig(
+	XPAR_XBACKGROUNDREMOVAL_0_DEVICE_ID);
+	int status = XBackgroundremoval_CfgInitialize(&backIp, backConfig);
+	if (status != 0)
+		printf("ERROR\n");
+	status = XBackgroundremoval_Initialize(&backIp, backConfig->DeviceId);
+	if (status != 0)
+		printf("ERROR\n");
+
+	XBackgroundremoval_Start(&backIp);
+	XBackgroundremoval_EnableAutoRestart(&backIp);
+	XBackgroundremoval_Set_ref_mem(&backIp, background);
+	XBackgroundremoval_Set_cols(&backIp, COLS);
+	XBackgroundremoval_Set_rows(&backIp, ROWS);
+	XBackgroundremoval_Set_thresh(&backIp, 30);
+
+
+	// DMA setup
+	XAxiDma dma;
+	XAxiDma_Config * dmaDevice = XAxiDma_LookupConfig(XPAR_AXI_DMA_0_DEVICE_ID);
+	status = XAxiDma_CfgInitialize(&dma, dmaDevice);
+	if (status != 0)
+		printf("ERROR\n");
+	XAxiDma_IntrDisable(&dma, XAXIDMA_IRQ_ALL_MASK, XAXIDMA_DEVICE_TO_DMA);
+	XAxiDma_IntrDisable(&dma, XAXIDMA_IRQ_ALL_MASK, XAXIDMA_DMA_TO_DEVICE);
+	// flush buffers cache
+	Xil_DCacheFlushRange( img, SIZE_ARR * sizeof(unsigned char));
+	Xil_DCacheFlushRange( resultBuffer, SIZE_ARR * sizeof(unsigned char));
+
+	printf("Sending data\n");
+
+	status = XAxiDma_SimpleTransfer(&dma,  img, SIZE_ARR * sizeof(unsigned char),
+	XAXIDMA_DMA_TO_DEVICE);
+	if (status != 0)
+		printf("ERROR TRANSFERT PS->PL FAILED\n");
+
+	printf("Getting data\n");
+	status = XAxiDma_SimpleTransfer(&dma, resultBuffer, SIZE_ARR * sizeof(unsigned char),
+	XAXIDMA_DEVICE_TO_DMA);
+	if (status != 0)
+		printf("ERROR TRANSFERT PL->PS FAILED\n");
+	Xil_DCacheInvalidateRange(resultBuffer, SIZE_ARR * sizeof(unsigned char));
+	// Reading data
+	for (int i = 0; i < SIZE_ARR; i++) {
+		if(i % (COLS) == 0 && i !=0)
+			printf("\n");
+		printf("%u, ", resultBuffer[i]);
+	}
+
+	cleanup_platform();
+	return 0;
+}
+
+```
+
+Malheureusement même si tout les transferts renvoient `XST_SUCCESS` signalant le bon déroulement de l'échange, le résultat est incorrect, aucune valeur de  `resultBuffer` n'est remplacée.
+
+Même après une validation par C/RTL co-simulation validant le fonctionnement individuel de l'ip, je ne réussis pas à la faire fonctionner au sein de la partie PS.
+
+![valid](https://i.ibb.co/0p5jHnN/Capture.png)
+
+### Architecture complète
+
+L'architecture suivante comprends tout les éléments du projet ainsi que l'entièreté de la chaine de traitement, elle n'utilise pas de composants soumis à des licences.
+
+#### Vivado
+
+![vi1](https://i.ibb.co/KsRrPnt/Capture2.png)
+
+En orange se trouve les deux VDMA, à gauche la première en lecture écriture qui envoi les images couleurs sur 24 bits, image passant par un `axi_broadcaster` pour diffuser le flux aux deux partie de la chaine de traitement et récupérant l'image avec le rectangle rouge à la sortie de l'IP contour. A droite une VDMA en écriture seul recevant le flux inutile issu de la partie détection de contours.
+
+En violet la partie détection de contour composé de `RGB2GRAY` => `backgroundRemoval` => `diff2img` => `GRAY2RGB`, le flux vidéo à la sortie de ce traitement n'est pas primordial mais est tout de même récupéré par la deuxième DMA pour s'assurer de la bonne consommation des données.
+
+![purple](https://i.ibb.co/QpRZfBZ/Capture.png)
+
+En vert les IP `diff2img` donnant les signaux permettant de tracer le rectangle rouge à l'IP `contour`, les signaux attestant de la validité de ceux-ci ne sont pas connectés, on pourrait imaginer ajouté un port à `contour` pour les tester.
+
+![green](https://i.ibb.co/1TrCnGv/Capture.png)
+
+#### Vitis
+
+Le code Vitis incorpore tous les éléments nécessaire au fonctionnement des IP présentes dans le design, se charge de l'envoi et de la réception du flux.
+
+Malheureusement OpenCV n'étant pas disponible sous Vitis, il est impossible de tester réellement le composant bien qu'il compile sans problème. 
+
+```cpp
+#include <stdio.h>
+#include "platform.h"
+#include "xil_printf.h"
+#include "xbackgroundremoval.h"
+#include "xaxivdma.h"
+#include "xgray2rgb.h"
+#include "xrgb2gray.h"
+#include "xdiff2img.h"
+#include "xcontour.h"
+
+#define ROWS 1080
+#define COLS 1920
+#define SIZE_ARR (COLS * ROWS)
+
+unsigned char background[SIZE_ARR];
+unsigned char diffImg[SIZE_ARR];
+unsigned char img[SIZE_ARR];
+unsigned char resultBuffer[SIZE_ARR];
+
+int main() {
+	init_platform();
+	Xil_DCacheDisable();
+	for (int i = 0; i < SIZE_ARR; ++i) {
+		background[i] = 0;
+		diffImg[i] = 0;
+	}
+	for (int i = 0; i < SIZE_ARR; ++i) {
+		img[i] = (unsigned char) 100u;
+	}
+	for (int i = 0; i < SIZE_ARR; ++i) {
+		resultBuffer[i] = 5u;
+	}
+	printf("\n__Projet SoC__\n\r");
+
+	// Background remover setup
+	XBackgroundremoval backIp;
+	XBackgroundremoval_Config * backConfig = XBackgroundremoval_LookupConfig(
+	XPAR_XBACKGROUNDREMOVAL_0_DEVICE_ID);
+	int status = XBackgroundremoval_CfgInitialize(&backIp, backConfig);
+	if (status != 0)
+		printf("ERROR\n");
+	status = XBackgroundremoval_Initialize(&backIp, backConfig->DeviceId);
+	if (status != 0)
+		printf("ERROR\n");
+	XBackgroundremoval_Set_ref_mem(&backIp, background);
+	XBackgroundremoval_Set_cols(&backIp, COLS);
+	XBackgroundremoval_Set_rows(&backIp, ROWS);
+	XBackgroundremoval_Set_thresh(&backIp, 30);
+	XBackgroundremoval_Start(&backIp);
+	XBackgroundremoval_EnableAutoRestart(&backIp);
+
+	// GRAY2RGB
+	XGray2rgb gray2rgbIp;
+	XGray2rgb_Config * gray2rgbConfig = XGray2rgb_LookupConfig(
+			XPAR_XGRAY2RGB_0_DEVICE_ID);
+	status = XGray2rgb_CfgInitialize(&gray2rgbIp, gray2rgbConfig);
+	if (status != 0)
+		printf("ERROR\n");
+	status = XGray2rgb_Initialize(&gray2rgbIp, gray2rgbConfig->DeviceId);
+	if (status != 0)
+		printf("ERROR\n");
+	XGray2rgb_Set_cols(&gray2rgbIp, COLS);
+	XGray2rgb_Set_rows(&gray2rgbIp, ROWS);
+	XGray2rgb_EnableAutoRestart(&gray2rgbIp);
+	XGray2rgb_Start(&gray2rgbIp);
+
+	// RGB2GRAY
+	XRgb2gray rgb2grayIp;
+	XRgb2gray_Config * rgb2grayConfig = XRgb2gray_LookupConfig(
+			XPAR_RGB2GRAY_0_DEVICE_ID);
+	status = XRgb2gray_CfgInitialize(&rgb2grayIp, rgb2grayConfig);
+	if (status != 0)
+		printf("ERROR\n");
+	status = XRgb2gray_Initialize(&rgb2grayIp, rgb2grayConfig->DeviceId);
+	if (status != 0)
+		printf("ERROR\n");
+	XRgb2gray_Set_cols(&rgb2grayIp, COLS);
+	XRgb2gray_Set_rows(&rgb2grayIp, ROWS);
+	XRgb2gray_EnableAutoRestart(&rgb2grayIp);
+	XRgb2gray_Start(&rgb2grayIp);
+
+	// diff2img
+	XDiff2img diff2img;
+	XDiff2img_Config * diff2imgConfig = XDiff2img_LookupConfig(
+			XPAR_DIFF2IMG_0_DEVICE_ID);
+	status = XDiff2img_CfgInitialize(&diff2img, diff2imgConfig);
+	if (status != 0)
+		printf("ERROR\n");
+	status = XDiff2img_Initialize(&diff2img, diff2imgConfig->DeviceId);
+	if (status != 0)
+		printf("ERROR\n");
+	XDiff2img_Set_cols(&diff2img, COLS);
+	XDiff2img_Set_rows(&diff2img, ROWS);
+	XDiff2img_Set_ref_mem(&diff2img, diffImg);
+	XDiff2img_EnableAutoRestart(&diff2img);
+	XDiff2img_Start(&diff2img);
+
+	// contour
+	XContour contourIp;
+	XContour_Config * contourConfig = XContour_LookupConfig(
+			XPAR_XCONTOUR_0_DEVICE_ID);
+	status = XContour_CfgInitialize(&contourIp, contourConfig);
+	if (status != 0)
+		printf("ERROR\n");
+	status = XContour_Initialize(&contourIp, contourConfig->DeviceId);
+	if (status != 0)
+		printf("ERROR\n");
+	XContour_Set_cols(&contourIp, COLS);
+	XContour_Set_rows(&contourIp, ROWS);
+	XContour_EnableAutoRestart(&contourIp);
+	XContour_Start(&contourIp);
+
+	// VDMA 0
+	XAxiVdma vdmaIp;
+	XAxiVdma_DmaSetup vdmaSetUp;
+	UINTPTR dma0Addr;
+	XAxiVdma_Config * vdmaConfig = XAxiVdma_LookupConfig(
+			XPAR_AXI_VDMA_0_DEVICE_ID);
+	status = XAxiVdma_CfgInitialize(&vdmaIp, vdmaConfig, dma0Addr);
+	if (status != 0)
+		printf("ERROR\n");
+
+	XAxiVdma_IntrDisable(&vdmaIp, XAXIVDMA_S2MM_IRQ_ERR_ALL_MASK,
+			XAXIVDMA_READ);
+	XAxiVdma_IntrDisable(&vdmaIp, XAXIVDMA_S2MM_IRQ_ERR_ALL_MASK,
+			XAXIVDMA_WRITE);
+
+	// VDMA 1 - Write only
+	XAxiVdma vdma1Ip;
+	UINTPTR dma1Addr;
+	XAxiVdma_Config * vdma1Config = XAxiVdma_LookupConfig(
+			XPAR_AXI_VDMA_1_DEVICE_ID);
+	status = XAxiVdma_CfgInitialize(&vdma1Ip, vdma1Config, dma1Addr);
+	if (status != 0)
+		printf("ERROR\n");
+	XAxiVdma_IntrDisable(&vdma1Ip, XAXIVDMA_S2MM_IRQ_ERR_ALL_MASK,
+			XAXIVDMA_WRITE);
+
+	// Transferts
+	printf("Sending data\n");
+	status = XAxiVdma_DmaConfig(&vdmaIp, XAXIVDMA_READ, &vdmaSetUp);
+	if (status != 0)
+		printf("ERROR\n");
+	status = XAxiVdma_StartReadFrame(&vdmaIp, &vdmaSetUp);
+	if (status != 0)
+		printf("ERROR\n");
+
+	printf("Reading data\n");
+	status = XAxiVdma_DmaConfig(&vdmaIp, XAXIVDMA_WRITE, &vdmaSetUp);
+	if (status != 0)
+		status = XAxiVdma_StartWriteFrame(&vdmaIp, &vdmaSetUp);
+
+	// ADD here code to display img
+
+	cleanup_platform();
+	return 0;
+}
+
+```
 
